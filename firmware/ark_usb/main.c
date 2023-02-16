@@ -11,6 +11,45 @@
 #include "usbdrv.h"
 #include <util/delay.h>     /* for _delay_ms() */
 
+PROGMEM const char usbHidReportDescriptor[USB_CFG_HID_REPORT_DESCRIPTOR_LENGTH] = { /* USB report descriptor, size must match usbconfig.h */
+    0x05, 0x01,                    // USAGE_PAGE (Generic Desktop)
+    0x09, 0x04,                    // USAGE (Joystick)
+    0xa1, 0x01,                    // COLLECTION (Application)
+    0xa1, 0x00,                    //   COLLECTION (Physical)
+    0x05, 0x09,                    //     USAGE_PAGE (Button)
+    0x19, 0x01,                    //     USAGE_MINIMUM (Button 1)
+    0x29, 0x01,                    //     USAGE_MAXIMUM (Button 1)
+    0x15, 0x00,                    //     LOGICAL_MINIMUM (0)
+    0x25, 0x01,                    //     LOGICAL_MAXIMUM (1)
+    0x95, 0x01,                    //     REPORT_COUNT (1)
+    0x75, 0x01,                    //     REPORT_SIZE (1)
+    0x81, 0x02,                    //     INPUT (Data,Var,Abs)
+    0x95, 0x01,                    //     REPORT_COUNT (1)
+    0x75, 0x07,                    //     REPORT_SIZE (7)
+    0x81, 0x03,                    //     INPUT (Cnst,Var,Abs)
+    0x05, 0x01,                    //     USAGE_PAGE (Generic Desktop)
+    0x09, 0x30,                    //     USAGE (X)
+    0x15, 0x00,                    //     LOGICAL_MINIMUM (0)
+    0x26, 0xff, 0x01,              //     LOGICAL_MAXIMUM (511)
+    0x75, 0x09,                    //     REPORT_SIZE (9)
+    0x95, 0x01,                    //     REPORT_COUNT (1)
+    0x81, 0x02,                    //     INPUT (Data,Var,Abs)
+    0x75, 0x07,                    //     REPORT_SIZE (7)
+    0x95, 0x01,                    //     REPORT_COUNT (1)
+    0x81, 0x03,                    //     INPUT (Cnst,Var,Abs)
+    0xc0,                          //     END_COLLECTION
+    0xc0                           // END_COLLECTION
+};
+
+typedef struct{
+	uint8_t		button;
+	uint16_t	pot;
+}report_t;
+
+static report_t reportBuffer;
+static volatile uint8_t reportBufferIdx_AT = 0;
+static uchar    idleRate;   /* repeat rate for keyboards, never used for mice */
+
 // PORT A
 #define	DATA1_PIN_bm	(1<<0)
 #define	CLOCK_PIN_bm	(1<<2)
@@ -20,43 +59,6 @@
 #define	BUTTON2_PIN_bm	(1<<6)
 #define	POT_PIN_bm		(1<<7)
 
-PROGMEM const char usbHidReportDescriptor[52] = { /* USB report descriptor, size must match usbconfig.h */
-    0x05, 0x01,                    // USAGE_PAGE (Generic Desktop)
-    0x09, 0x02,                    // USAGE (Mouse)
-    0xa1, 0x01,                    // COLLECTION (Application)
-    0x09, 0x01,                    //   USAGE (Pointer)
-    0xA1, 0x00,                    //   COLLECTION (Physical)
-    0x05, 0x09,                    //     USAGE_PAGE (Button)
-    0x19, 0x01,                    //     USAGE_MINIMUM
-    0x29, 0x03,                    //     USAGE_MAXIMUM
-    0x15, 0x00,                    //     LOGICAL_MINIMUM (0)
-    0x25, 0x01,                    //     LOGICAL_MAXIMUM (1)
-    0x95, 0x03,                    //     REPORT_COUNT (3)
-    0x75, 0x01,                    //     REPORT_SIZE (1)
-    0x81, 0x02,                    //     INPUT (Data,Var,Abs)
-    0x95, 0x01,                    //     REPORT_COUNT (1)
-    0x75, 0x05,                    //     REPORT_SIZE (5)
-    0x81, 0x03,                    //     INPUT (Const,Var,Abs)
-    0x05, 0x01,                    //     USAGE_PAGE (Generic Desktop)
-    0x09, 0x30,                    //     USAGE (X)
-    0x09, 0x31,                    //     USAGE (Y)
-    0x09, 0x38,                    //     USAGE (Wheel)
-    0x15, 0x81,                    //     LOGICAL_MINIMUM (-127)
-    0x25, 0x7F,                    //     LOGICAL_MAXIMUM (127)
-    0x75, 0x08,                    //     REPORT_SIZE (8)
-    0x95, 0x03,                    //     REPORT_COUNT (3)
-    0x81, 0x06,                    //     INPUT (Data,Var,Rel)
-    0xC0,                          //   END_COLLECTION
-    0xC0,                          // END COLLECTION
-};
-
-typedef struct{
-	uint8_t	button;
-	int8_t	pot;
-}report_t;
-
-static report_t reportBuffer;
-static uchar    idleRate;   /* repeat rate for keyboards, never used for mice */
 
 int main(void)
 {
@@ -64,22 +66,56 @@ int main(void)
 	DDRA =	CLOCK_PIN_bm | READ_PIN_bm;
 
 	PORTB = 0b10000111;		// programmer SPI interface pull ups
-	DDRB =  0b00000000;
+	DDRB =  0b00000001;		// MOSI as output
+
+	// USB interrupt, port B pin 6 change, INT0
+	MCUCR |= (1<<ISC00);	// any change triggers the interrupt
+	MCUCR &= ~(1<<ISC01);
+	GIMSK = (1<<INT0);
 
 	// USI in SPI mode on PORT B
-	USIPP = USIPOS;			// PORT A
-	USICR = USIWM0;			// 3 wire mode
-	
+	USIPP = (1<<USIPOS);	// PORT A
+	USICR = (1<<USIWM0);	// 3 wire mode
+
 	usbInit();
 	usbDeviceDisconnect();  // enforce re-enumeration, do this while interrupts are disabled!
 	_delay_ms(255);			// USB reset
 	usbDeviceConnect();
 	sei();
-	
+
 	for (;;)
 	{
 		usbPoll();
-		// read controller
+		if (usbInterruptIsReady())
+		{
+			// clock out bits via SPI
+			USISR = (1<<USIOIF);		// clear overflow flag, counter = 0
+			for (uint8_t i = 0; i < 8; i++)
+			{
+				_delay_us(10);
+				USICR = (1<<USIWM0) | (1<<USICS1) | (1<<USITC);
+				_delay_us(10);
+				USICR = (1<<USIWM0) | (1<<USICS1) | (1<<USICLK) | (1<<USITC);
+			}
+			uint16_t pot = (uint16_t)USIDR << 1;
+			_delay_us(10);
+			USICR = (1<<USIWM0) | (1<<USICS1) | (1<<USITC);
+			_delay_us(10);
+			USICR = (1<<USIWM0) | (1<<USICS1) | (1<<USICLK) | (1<<USITC);
+			pot |= USIDR & 1;
+
+			cli();
+			reportBuffer.pot = pot;
+			reportBuffer.button = PINA & BUTTON1_PIN_bm ? 0 : 1;
+			sei();
+
+			usbSetInterrupt((uchar *)&reportBuffer, sizeof(report_t));
+
+			// read controller again
+			PORTA |= READ_PIN_bm;
+			_delay_us(100);
+			PORTA &= ~READ_PIN_bm;
+		}
 	}
 }
 
@@ -96,7 +132,7 @@ usbMsgLen_t usbFunctionSetup(uchar data[8])
 		{
 			/* we only have one report type, so don't look at wValue */
 			usbMsgPtr = (usbMsgPtr_t)&reportBuffer;
-			return sizeof(reportBuffer);
+			return sizeof(report_t);
 		}
 		else if(rq->bRequest == USBRQ_HID_GET_IDLE)
 		{
