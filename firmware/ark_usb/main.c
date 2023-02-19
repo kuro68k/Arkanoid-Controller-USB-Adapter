@@ -5,11 +5,14 @@
  * Author : kuro68k
  */ 
 
+#include <stdbool.h>
 #include <avr/io.h>
 #include <avr/interrupt.h>  /* for sei() */
 #include <avr/pgmspace.h>   /* required by usbdrv.h */
 #include "usbdrv.h"
 #include <util/delay.h>     /* for _delay_ms() */
+
+#define ABSOLUTE_MODE
 
 PROGMEM const char usbHidReportDescriptor[USB_CFG_HID_REPORT_DESCRIPTOR_LENGTH] = { /* USB report descriptor, size must match usbconfig.h */
     0x05, 0x01,                    // USAGE_PAGE (Generic Desktop)
@@ -29,8 +32,13 @@ PROGMEM const char usbHidReportDescriptor[USB_CFG_HID_REPORT_DESCRIPTOR_LENGTH] 
     0x81, 0x03,                    //     INPUT (Cnst,Var,Abs)
     0x05, 0x01,                    //     USAGE_PAGE (Generic Desktop)
     0x09, 0x30,                    //     USAGE (X)
-    0x15, 0x00,                    //     LOGICAL_MINIMUM (0)
+#ifdef ABSOLUTE_MODE
+    0x16, 0x00, 0x00,              //     LOGICAL_MINIMUM (0)
     0x26, 0xff, 0x01,              //     LOGICAL_MAXIMUM (511)
+#else
+    0x16, 0x01, 0xff,              //     LOGICAL_MINIMUM (-255)
+    0x26, 0xff, 0x00,              //     LOGICAL_MAXIMUM (255)
+#endif
     0x75, 0x09,                    //     REPORT_SIZE (9)
     0x95, 0x01,                    //     REPORT_COUNT (1)
     0x81, 0x02,                    //     INPUT (Data,Var,Abs)
@@ -42,8 +50,8 @@ PROGMEM const char usbHidReportDescriptor[USB_CFG_HID_REPORT_DESCRIPTOR_LENGTH] 
 };
 
 typedef struct{
-	uint8_t		button;
-	uint16_t	pot;
+	uint8_t	button;
+	int16_t	pot;
 }report_t;
 
 static report_t reportBuffer;
@@ -83,6 +91,12 @@ int main(void)
 	usbDeviceConnect();
 	sei();
 
+#ifdef ABSOLUTE_MODE
+	uint16_t min = 255;
+	uint16_t max = 256;
+#else
+	uint16_t last_pot = 511;
+#endif
 	for (;;)
 	{
 		usbPoll();
@@ -97,19 +111,40 @@ int main(void)
 				_delay_us(10);
 				USICR = (1<<USIWM0) | (1<<USICS1) | (1<<USICLK) | (1<<USITC);
 			}
-			uint16_t pot = (uint16_t)USIDR << 1;
+			int16_t pot = (uint16_t)USIDR << 1;
 			_delay_us(10);
 			USICR = (1<<USIWM0) | (1<<USICS1) | (1<<USITC);
 			_delay_us(10);
 			USICR = (1<<USIWM0) | (1<<USICS1) | (1<<USICLK) | (1<<USITC);
 			pot |= USIDR & 1;
+			if (pot > 511)
+				pot = 511;
 
-			cli();
-			reportBuffer.pot = pot;
-			reportBuffer.button = PINA & BUTTON1_PIN_bm ? 0 : 1;
-			sei();
+			if ((pot > 100) && (pot < 500))
+			{
+#ifdef ABSOLUTE_MODE
+				if (min > pot)
+					min = pot;
+				if (max < pot)
+					max = pot;
+				float scale = 511 / ((float)max - (float)min);
+				scale *= (float)pot - (float)min;
+				pot = scale;
+				if (pot > 511)
+					pot = 511;
+#else
+				int16_t temp = pot;
+				pot = pot - last_pot;
+				last_pot = temp;
+				pot *= 10;
+#endif
+				cli();
+				reportBuffer.pot = pot;
+				reportBuffer.button = PINA & BUTTON1_PIN_bm ? 0 : 1;
+				sei();
 
-			usbSetInterrupt((uchar *)&reportBuffer, sizeof(report_t));
+				usbSetInterrupt((uchar *)&reportBuffer, sizeof(report_t));
+			}
 
 			// read controller again
 			PORTA |= READ_PIN_bm;
