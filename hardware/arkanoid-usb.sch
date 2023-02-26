@@ -120,9 +120,9 @@ Text Label 7200 3550 2    50   ~ 0
 SCK
 Text Label 7200 4050 2    50   ~ 0
 RST
-Text Label 2800 1350 2    50   ~ 0
-MOSI
 Text Label 2800 1450 2    50   ~ 0
+MOSI
+Text Label 2800 1350 2    50   ~ 0
 MISO
 Text Label 2800 1550 2    50   ~ 0
 SCK
